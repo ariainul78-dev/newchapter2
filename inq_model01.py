@@ -10,7 +10,7 @@ from openai import OpenAI
 # =========================================
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 DATABASE_URL = st.secrets["DATABASE_URL"]
-MODEL = "gpt-4o-mini"  # atau gpt-4o, gpt-4.1, terserah kamu
+MODEL = "gpt-4o-mini"
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -72,6 +72,7 @@ def save_to_postgres(all_data):
                 }
             )
         return True
+
     except Exception as e:
         st.error(f"데이터베이스 저장 오류: {e}")
         return False
@@ -81,6 +82,7 @@ def save_to_postgres(all_data):
 # OpenAI API (NEW FORMAT)
 # =========================================
 def get_openai_response(prompt):
+
     messages_for_api = (
         [{"role": "system", "content": initial_prompt}]
         + st.session_state["messages"]
@@ -95,7 +97,7 @@ def get_openai_response(prompt):
 
         answer = response.choices[0].message.content
 
-        # simpan ke session state
+        # simpan
         st.session_state["messages"].append({"role": "user", "content": prompt})
         st.session_state["messages"].append({"role": "assistant", "content": answer})
 
@@ -110,9 +112,12 @@ def get_openai_response(prompt):
 # Reset Session
 # =========================================
 def reset_session_state():
+    preserved_keys = ["user_number", "user_name"]
+
     for key in list(st.session_state.keys()):
-        if key not in ["user_number", "user_name"]:
+        if key not in preserved_keys:
             del st.session_state[key]
+
     st.session_state["messages"] = []
     st.session_state["chat_ended"] = False
     st.session_state["user_said_finish"] = False
@@ -189,6 +194,7 @@ def page_3():
             get_openai_response("마침")
             st.session_state["chat_ended"] = True
             st.session_state["user_said_finish"] = True
+            st.session_state["step"] = 4
             st.rerun()
 
     st.subheader("📜 대화 기록")
@@ -210,17 +216,23 @@ def page_4():
         return
 
     chat_history = "\n".join(
-        f"{m['role']}: {m['content']}" for m in st.session_state["messages"]
+        f"{m['role']}: {m['content']}"
+        for m in st.session_state["messages"]
     )
 
     prompt = f"다음 대화를 요약하고 학생에게 필요한 피드백을 작성하세요:\n\n{chat_history}"
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[{"role": "system", "content": prompt}]
-    )
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": prompt}]
+        )
+        result = response.choices[0].message.content
 
-    result = response.choices[0].message.content
+    except Exception as e:
+        st.error(f"요약 생성 오류: {e}")
+        return
+
     st.session_state["experiment_plan"] = result
 
     st.subheader("📋 피드백 결과")
