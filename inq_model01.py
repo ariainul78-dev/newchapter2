@@ -3,16 +3,17 @@ import json
 import streamlit as st
 from datetime import datetime
 from sqlalchemy import create_engine, text
-from openai import OpenAI
+import openai  # pakai ini saja
 
 # =========================================
 # Streamlit Secrets
 # =========================================
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 DATABASE_URL = st.secrets["DATABASE_URL"]
-MODEL = "gpt-4o-mini"
+MODEL = "gpt-4o-mini"  # bisa diganti sesuai akses
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# set API key
+openai.api_key = OPENAI_API_KEY
 
 # =========================================
 # PostgreSQL Connection
@@ -46,7 +47,6 @@ if "chat_ended" not in st.session_state:
 if "user_said_finish" not in st.session_state:
     st.session_state["user_said_finish"] = False
 
-
 # =========================================
 # Save to PostgreSQL
 # =========================================
@@ -72,17 +72,14 @@ def save_to_postgres(all_data):
                 }
             )
         return True
-
     except Exception as e:
         st.error(f"데이터베이스 저장 오류: {e}")
         return False
 
-
 # =========================================
-# OpenAI API (NEW FORMAT)
+# OpenAI API
 # =========================================
 def get_openai_response(prompt):
-
     messages_for_api = (
         [{"role": "system", "content": initial_prompt}]
         + st.session_state["messages"]
@@ -90,14 +87,14 @@ def get_openai_response(prompt):
     )
 
     try:
-        response = client.chat.completions.create(
+        response = openai.chat.completions.create(
             model=MODEL,
             messages=messages_for_api
         )
 
         answer = response.choices[0].message.content
 
-        # simpan
+        # simpan ke session state
         st.session_state["messages"].append({"role": "user", "content": prompt})
         st.session_state["messages"].append({"role": "assistant", "content": answer})
 
@@ -107,22 +104,17 @@ def get_openai_response(prompt):
         st.error(f"OpenAI Error: {e}")
         return "[Error: gagal memproses permintaan]"
 
-
 # =========================================
 # Reset Session
 # =========================================
 def reset_session_state():
-    preserved_keys = ["user_number", "user_name"]
-
     for key in list(st.session_state.keys()):
-        if key not in preserved_keys:
+        if key not in ["user_number", "user_name"]:
             del st.session_state[key]
-
     st.session_state["messages"] = []
     st.session_state["chat_ended"] = False
     st.session_state["user_said_finish"] = False
     st.session_state["feedback_saved"] = False
-
 
 # =========================================
 # Page 1 – User Info
@@ -147,7 +139,6 @@ def page_1():
             st.session_state["step"] = 2
             st.rerun()
 
-
 # =========================================
 # Page 2 – Instructions
 # =========================================
@@ -156,17 +147,14 @@ def page_2():
     st.write("챗봇을 사용하여 문제 해결을 연습하세요.")
 
     col1, col2 = st.columns([1, 1])
-
     with col1:
         if st.button("이전"):
             st.session_state["step"] = 1
             st.rerun()
-
     with col2:
         if st.button("다음"):
             st.session_state["step"] = 3
             st.rerun()
-
 
 # =========================================
 # Page 3 – Chat Interface
@@ -182,19 +170,16 @@ def page_3():
     user_input = st.text_area("You:", "")
 
     col1, col2 = st.columns([1, 1])
-
     with col1:
         if st.button("전송"):
             if user_input.strip():
                 get_openai_response(user_input)
                 st.rerun()
-
     with col2:
         if st.button("마침"):
             get_openai_response("마침")
             st.session_state["chat_ended"] = True
             st.session_state["user_said_finish"] = True
-            st.session_state["step"] = 4
             st.rerun()
 
     st.subheader("📜 대화 기록")
@@ -203,7 +188,6 @@ def page_3():
             st.write(f"**You:** {msg['content']}")
         else:
             st.write(f"**수학여행 도우미:** {msg['content']}")
-
 
 # =========================================
 # Page 4 – Summary & Save
@@ -216,23 +200,17 @@ def page_4():
         return
 
     chat_history = "\n".join(
-        f"{m['role']}: {m['content']}"
-        for m in st.session_state["messages"]
+        f"{m['role']}: {m['content']}" for m in st.session_state["messages"]
     )
 
     prompt = f"다음 대화를 요약하고 학생에게 필요한 피드백을 작성하세요:\n\n{chat_history}"
 
-    try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "system", "content": prompt}]
-        )
-        result = response.choices[0].message.content
+    response = openai.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "system", "content": prompt}]
+    )
 
-    except Exception as e:
-        st.error(f"요약 생성 오류: {e}")
-        return
-
+    result = response.choices[0].message.content
     st.session_state["experiment_plan"] = result
 
     st.subheader("📋 피드백 결과")
@@ -249,7 +227,6 @@ def page_4():
             st.session_state["feedback_saved"] = True
         else:
             st.error("저장 실패.")
-
 
 # =========================================
 # Main Routing
