@@ -1,4 +1,8 @@
 streamlit==1.28.0
 sqlalchemy==2.0.22
-psycopg2-binary==2.9.6
+psycopg2-binary==2.9.7
 openai==1.31.0
+rich==14.2.0
+markdown-it-py==4.0.0
+mdurl==0.1.2
+pygments==2.19.2
