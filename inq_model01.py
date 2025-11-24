@@ -1,44 +1,80 @@
 import os
 import json
-import streamlit as st
 from datetime import datetime
-from sqlalchemy import create_engine, text
-import openai  # pakai ini saja
+import streamlit as st
+import pymysql
+from pymongo import MongoClient
+import openai
+from dotenv import load_dotenv
 
 # =========================================
-# Streamlit Secrets
+# 환경 변수 로드
 # =========================================
+load_dotenv()
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
-DATABASE_URL = st.secrets["DATABASE_URL"]
-MODEL = "gpt-4o-mini"  # bisa diganti sesuai akses
+MODEL = 'gpt-4o'
 
-# set API key
 openai.api_key = OPENAI_API_KEY
 
-# =========================================
-# PostgreSQL Connection
-# =========================================
-engine = create_engine(DATABASE_URL)
+# MongoDB 설정 (전역)
+mongo_client = MongoClient(st.secrets["MONGO_URI"])
+db = mongo_client[st.secrets["MONGO_DB"]]
+collection = db[st.secrets["MONGO_COLLECTION"]]
+collection_feedback = db[st.secrets["MONGO_COLLECTION_FEEDBACK"]]
+
+# 페이지 기본 설정
+st.set_page_config(page_title="수학여행 도우미", page_icon="🧠", layout="wide")
+
+# 초기 프롬프트
+initial_prompt = '''
+너는 '수학여행 도우미'라는 이름의 챗봇으로, 고등학생의 수학 문제 해결을 돕는 역할을 수행한다.
+
+너의 목표는 학생이 스스로 탐구하고 문제를 해결할 수 있도록 유도하는 것이다. 어떤 경우에도 정답이나 풀이 과정을 직접 제공하지 말고, 수학 개념, 사고 전략, 접근 방법, 개념 유도 질문 등을 제공해야 한다.
+
+대화는 다음 절차를 따른다:
+1. 학생이 수학 문제를 제시한다.
+2. 너는 문제 해결에 필요한 수학 개념, 사고 방향, 접근 전략을 안내한다.
+3. 너는 어떤 대화 경우에도 학생이 제시한 수학문제의 정답이나 풀이 과정을 직접 제공하지 않는다.
+4. 학생이 "궁금한 건 다 물어봤어"라고 말하면, 종료 조건을 만족하는지 판단하고 대화를 요약한 후 피드백을 제공한다.
+5. 종료 후 학생이 다음 단계로 넘어갈 수 있도록 [다음] 버튼 클릭을 안내한다.
+
+**대화 방식 지침**
+- 질문은 한 번에 한 가지, 한 문장 이내로 간결하게 한다.
+- 개념 설명은 학생 수준에서 명확하고 간결하게 한다.
+- 어떤 경우에도 정답이나 풀이 과정은 절대 제공하지 않는다.
+- 학생이 정답이나 풀이를 요구해도 개념과 접근 방법으로만 안내한다.
+- 정답을 정확히 제시한 경우에는 난이도를 높인 문제를 제시한다.
+- 사고를 유도하는 질문을 사용한다. 예:
+  - "이 문제를 해결하려면 어떤 공식을 써야 할까?"
+  - "이 상황에서 어떤 수학 개념이 떠오르니?"
+
+**힌트 제공 원칙**
+- 정답 대신 더 쉬운 유사 문제 또는 핵심 개념을 제시한다.
+- 학생이 제시한 개념이나 공식을 평가하고, 필요시 보충 설명을 제공한다.
+
+**풀이 평가 및 피드백 규칙**
+- 정확한 풀이를 제시한 경우 더 어려운 문제로 이어간다.
+- 오류가 있으면 더 쉬운 문제를 제시하고 개념을 재정리한다.
+
+**금지 사항**
+- 어떤 대화 경우에도 학생이 제시한 수학문제의 정답이나 풀이 과정을 직접 제공하지 않는다.
+- "모르겠어요"라고 해도 답을 알려주지 말고 질문과 유도를 통해 사고를 유도한다.
+
+**LaTeX 수식 처리 규칙**
+- 모든 수학 개념과 공식은 반드시 LaTeX 수식으로 표현하여 출력한다.
+- 인라인 수식은 `$수식$`, 블록 수식은 `$$ 수식 $$` 형태로 출력한다.
+- 학생이 LaTeX 형식으로 `$` 또는 `$$` 없이 수식을 입력하여도 자동으로 `$수식$`, 블록 수식은 `$$ 수식 $$` 형태로 변환하여 출력한다.
+- 수식 문법 오류가 있어도 에러 메시지를 출력하지 않고 자연스럽게 올바른 표현으로 안내한다.
+
+**종료 조건**:
+- 학생이 “마침”이라고 말하면, 지금까지의 대화 내용을 요약해줘.
+  - 학생이 스스로 정답을 말한 경우: 가이드 답안을 제공하고 추가 문제를 제시해 줘
+  - 정답을 말하지 않은 경우: 정답을 언급하지 않고 사용한 접근 방식이나 전략만 정리해 줘.
+  - 마지막엔 “이제 [다음] 버튼을 눌러 마무리해 줘!”라고 안내해.
+'''
 
 # =========================================
-# Streamlit Page Config
-# =========================================
-st.set_page_config(
-    page_title="수학여행 도우미",
-    page_icon="🧠",
-    layout="wide"
-)
-
-# =========================================
-# Initial Prompt
-# =========================================
-initial_prompt = """
-너는 '수학여행 도우미' 이름의 챗봇으로, 고등학생의 수학 문제 해결을 돕는다.
-설명은 친절하지만 학생 스스로 생각하게 유도한다.
-"""
-
-# =========================================
-# Session State Init
+# 세션 상태 초기화
 # =========================================
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
@@ -48,64 +84,49 @@ if "user_said_finish" not in st.session_state:
     st.session_state["user_said_finish"] = False
 
 # =========================================
-# Save to PostgreSQL
+# MongoDB 저장 함수
 # =========================================
-def save_to_postgres(all_data):
-    number = st.session_state.get("user_number", "").strip()
-    name = st.session_state.get("user_name", "").strip()
-
+def save_to_mongo(all_data):
+    number = st.session_state.get('user_number', '').strip()
+    name = st.session_state.get('user_name', '').strip()
     if not number or not name:
-        st.error("학번과 이름을 입력해야 저장할 수 있습니다.")
+        st.error("사용자 학번과 이름을 입력해야 합니다.")
         return False
 
     try:
-        with engine.connect() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO qna (number, name, chat, time)
-                    VALUES (:number, :name, :chat, NOW())
-                """),
-                {
-                    "number": number,
-                    "name": name,
-                    "chat": json.dumps(all_data),
-                }
-            )
+        document = {
+            "number": number,
+            "name": name,
+            "chat": all_data,
+            "time": datetime.now()
+        }
+        collection.insert_one(document)
         return True
     except Exception as e:
-        st.error(f"데이터베이스 저장 오류: {e}")
+        st.error(f"MongoDB 저장 중 오류가 발생했습니다: {e}")
         return False
 
 # =========================================
-# OpenAI API
+# GPT 응답 생성 함수
 # =========================================
-def get_openai_response(prompt):
-    messages_for_api = (
-        [{"role": "system", "content": initial_prompt}]
-        + st.session_state["messages"]
-        + [{"role": "user", "content": prompt}]
-    )
-
+def get_chatgpt_response(prompt):
+    messages_for_api = [{"role": "system", "content": initial_prompt}] + st.session_state["messages"] + [{"role": "user", "content": prompt}]
     try:
         response = openai.chat.completions.create(
             model=MODEL,
-            messages=messages_for_api
+            messages=messages_for_api,
         )
-
         answer = response.choices[0].message.content
 
-        # simpan ke session state
         st.session_state["messages"].append({"role": "user", "content": prompt})
         st.session_state["messages"].append({"role": "assistant", "content": answer})
-
         return answer
-
     except Exception as e:
-        st.error(f"OpenAI Error: {e}")
-        return "[Error: gagal memproses permintaan]"
+        st.error(f"OpenAI 오류: {e}")
+        return "[Error: GPT 응답 실패]"
 
 # =========================================
-# Reset Session
+# 세션 상태 초기화
 # =========================================
 def reset_session_state():
     for key in list(st.session_state.keys()):
@@ -117,36 +138,28 @@ def reset_session_state():
     st.session_state["feedback_saved"] = False
 
 # =========================================
-# Page 1 – User Info
+# 페이지 1: 학번 및 이름 입력
 # =========================================
 def page_1():
-    st.title("수학여행 도우미 M1")
-    st.write("학번과 이름을 입력하세요.")
-
-    st.session_state["user_number"] = st.text_input(
-        "학번",
-        value=st.session_state.get("user_number", "")
-    )
-    st.session_state["user_name"] = st.text_input(
-        "이름",
-        value=st.session_state.get("user_name", "")
-    )
+    st.title("수학여행 도우미 챗봇 M1")
+    st.write("학번과 이름을 입력한 뒤 '다음' 버튼을 눌러주세요.")
+    st.session_state["user_number"] = st.text_input("학번", value=st.session_state.get("user_number",""))
+    st.session_state["user_name"] = st.text_input("이름", value=st.session_state.get("user_name",""))
 
     if st.button("다음"):
         if not st.session_state["user_number"].strip() or not st.session_state["user_name"].strip():
-            st.error("학번과 이름을 모두 입력하세요.")
+            st.error("학번과 이름을 모두 입력해주세요.")
         else:
             st.session_state["step"] = 2
             st.rerun()
 
 # =========================================
-# Page 2 – Instructions
+# 페이지 2: 사용법 안내
 # =========================================
 def page_2():
-    st.title("수학여행 도우미 사용방법")
-    st.write("챗봇을 사용하여 문제 해결을 연습하세요.")
-
-    col1, col2 = st.columns([1, 1])
+    st.title("수학여행 도우미 활용 방법")
+    st.write("학생은 문제를 입력하고, 인공지능이 개념과 전략을 안내합니다. '마침'을 누르면 피드백 페이지로 이동합니다.")
+    col1, col2 = st.columns(2)
     with col1:
         if st.button("이전"):
             st.session_state["step"] = 1
@@ -157,79 +170,92 @@ def page_2():
             st.rerun()
 
 # =========================================
-# Page 3 – Chat Interface
+# 페이지 3: GPT와 대화
 # =========================================
 def page_3():
     st.title("수학여행 도우미와 대화하기")
-
     if not st.session_state.get("user_number") or not st.session_state.get("user_name"):
         st.error("학번과 이름이 누락되었습니다.")
         st.session_state["step"] = 1
         st.rerun()
 
-    user_input = st.text_area("You:", "")
-
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("전송"):
-            if user_input.strip():
-                get_openai_response(user_input)
+    if st.session_state.get("chat_ended", False):
+        st.info("대화가 종료되었습니다. [다음] 버튼을 눌러 피드백을 확인하세요.")
+        st.text_area("You:", value="", disabled=True)
+        col1, col2 = st.columns(2)
+        with col1: st.button("전송", disabled=True)
+        with col2: st.button("마침", disabled=True)
+    else:
+        user_input = st.text_area("You:", value="", key="user_input_temp")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("전송"):
+                if user_input.strip():
+                    get_chatgpt_response(user_input)
+                    st.rerun()
+        with col2:
+            if st.button("마침"):
+                get_chatgpt_response("마침")
+                st.session_state["chat_ended"] = True
+                st.session_state["user_said_finish"] = True
                 st.rerun()
-    with col2:
-        if st.button("마침"):
-            get_openai_response("마침")
-            st.session_state["chat_ended"] = True
-            st.session_state["user_said_finish"] = True
-            st.rerun()
 
-    st.subheader("📜 대화 기록")
+    st.subheader("📜 누적 대화")
     for msg in st.session_state["messages"]:
-        if msg["role"] == "user":
-            st.write(f"**You:** {msg['content']}")
-        else:
-            st.write(f"**수학여행 도우미:** {msg['content']}")
+        role = "You" if msg["role"]=="user" else "수학여행 도우미"
+        st.write(f"**{role}:** {msg['content']}")
+
+    col3, col4 = st.columns(2)
+    with col3:
+        if st.button("이전"):
+            st.session_state["step"] = 2
+            st.rerun()
+    with col4:
+        if st.session_state.get("chat_ended", False):
+            if st.button("다음"):
+                st.session_state["step"] = 4
+                st.session_state["feedback_saved"] = False
+                st.rerun()
 
 # =========================================
-# Page 4 – Summary & Save
+# 페이지 4: 피드백
 # =========================================
 def page_4():
     st.title("수학여행 도우미의 제안")
 
-    if not st.session_state.get("user_said_finish"):
-        st.write("대화를 먼저 종료하세요.")
-        return
-
-    chat_history = "\n".join(
-        f"{m['role']}: {m['content']}" for m in st.session_state["messages"]
-    )
-
-    prompt = f"다음 대화를 요약하고 학생에게 필요한 피드백을 작성하세요:\n\n{chat_history}"
-
-    response = openai.chat.completions.create(
-        model=MODEL,
-        messages=[{"role": "system", "content": prompt}]
-    )
-
-    result = response.choices[0].message.content
-    st.session_state["experiment_plan"] = result
-
-    st.subheader("📋 피드백 결과")
-    st.write(result)
-
-    if not st.session_state.get("feedback_saved", False):
-        all_data_to_store = (
-            st.session_state["messages"]
-            + [{"role": "assistant", "content": result}]
+    if st.session_state.get("user_said_finish", False) and not st.session_state.get("feedback_saved", False):
+        chat_history = "\n".join(f"{msg['role']}: {msg['content']}" for msg in st.session_state["messages"])
+        prompt = f"학생이 '마침'을 눌렀습니다. 대화 요약과 피드백 생성:\n\n{chat_history}"
+        response = openai.chat.completions.create(
+            model=MODEL,
+            messages=[{"role":"system","content":prompt}]
         )
+        st.session_state["experiment_plan"] = response.choices[0].message.content
 
-        if save_to_postgres(all_data_to_store):
-            st.success("저장되었습니다!")
+    st.subheader("📋 생성된 피드백")
+    st.write(st.session_state.get("experiment_plan",""))
+
+    # 저장
+    all_data_to_store = st.session_state["messages"] + [{"role":"assistant","content":st.session_state.get("experiment_plan","")}]
+    if not st.session_state.get("feedback_saved", False):
+        if save_to_mongo(all_data_to_store):
             st.session_state["feedback_saved"] = True
+            st.success("대화 기록이 저장되었습니다.")
         else:
-            st.error("저장 실패.")
+            st.error("저장 실패!")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("처음으로"):
+            reset_session_state()
+            st.session_state["step"] = 1
+            st.rerun()
+    with col2:
+        if st.button("종료"):
+            st.stop()
 
 # =========================================
-# Main Routing
+# Main
 # =========================================
 if "step" not in st.session_state:
     st.session_state["step"] = 1
