@@ -6,26 +6,40 @@ from dotenv import load_dotenv
 from datetime import datetime
 from pymongo import MongoClient as PyMongoClient
 import streamlit as st
+import httpx # <-- DITAMBAHKAN: Diperlukan untuk konfigurasi http client yang lebih aman
 
+# --- KONFIGURASI AWAL ---
 
-# 환경 변수 로드
-load_dotenv()
+# Lingkungan: st.secrets digunakan di Streamlit Cloud, tidak perlu load_dotenv() di sini.
+# load_dotenv() 
+
+# Ambil API Key dari Streamlit Secrets
 OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 MODEL = 'gpt-4o'
 
-# OpenAI API 설정
-client = OpenAI(api_key=OPENAI_API_KEY)
+# OpenAI API Pengaturan
+# Perbaikan untuk mengatasi error "unexpected keyword argument 'proxies'"
+# Menginisialisasi httpx.Client secara eksplisit untuk menghindari konflik proxy
+try:
+    # Membuat klien HTTPX dasar tanpa pengaturan proxy eksplisit 
+    # (ini seringkali mengatasi konflik di lingkungan cloud)
+    base_http_client = httpx.Client()
+    client = OpenAI(api_key=OPENAI_API_KEY, http_client=base_http_client)
+except Exception:
+    # Jika klien HTTPX bermasalah, kembali ke inisialisasi standar
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
-# MongoDB 설정
+
+# MongoDB Pengaturan
 mongo_client = PyMongoClient(st.secrets["MONGO_URI"])
 db = mongo_client[st.secrets["MONGO_DB"]]
 collection = db[st.secrets["MONGO_COLLECTION"]]
 collection_feedback = db[st.secrets["MONGO_COLLECTION_FEEDBACK"]]
 
-# 페이지 기본 설정
+# Halaman Pengaturan Dasar
 st.set_page_config(page_title="수학여행 도우미", page_icon="🧠", layout="wide")
 
-# 초기 프롬프트
+# --- PROMPT SISTEM ---
 initial_prompt = '''
 너는 '수학여행 도우미'라는 이름의 챗봇으로, 고등학생의 수학 문제 해결을 돕는 역할을 수행한다.
 
@@ -73,105 +87,119 @@ initial_prompt = '''
   - 마지막엔 “이제 [다음] 버튼을 눌러 마무리해 줘!”라고 안내해.
 '''
 
-# 세션 상태 초기화
+# --- SESSION STATE INISIALISASI ---
 if "messages" not in st.session_state:
-    st.session_state["messages"] = []
+    st.session_state["messages"] = []
 if "chat_ended" not in st.session_state:
-    st.session_state["chat_ended"] = False
+    st.session_state["chat_ended"] = False
 if "user_said_finish" not in st.session_state:
-    st.session_state["user_said_finish"] = False
+    st.session_state["user_said_finish"] = False
+if "step" not in st.session_state:
+    st.session_state["step"] = 1 # <--- DITAMBAHKAN: Mengatur langkah awal
 
-# MongoDB 저장 함수
+# --- FUNGSI PENDUKUNG ---
+
+# MongoDB Simpan Fungsi
 def save_to_mongo(all_data):
-    number = st.session_state.get('user_number', '').strip()
-    name = st.session_state.get('user_name', '').strip()
+    number = st.session_state.get('user_number', '').strip()
+    name = st.session_state.get('user_name', '').strip()
 
-    if not number or not name:
-        st.error("사용자 학번과 이름을 입력해야 합니다.")
-        return False
+    if not number or not name:
+        st.error("사용자 학번과 이름을 입력해야 합니다.")
+        return False
 
-    client = None  # 먼저 정의
-
-    try:
+    mongo_client_local = None 
+    try:
+        # Gunakan konfigurasi mongo_client global yang sudah didefinisikan di atas,
+        # atau buat koneksi lokal baru jika ingin memastikan koneksi fresh
         from pymongo import MongoClient
-        from datetime import datetime
+        mongo_client_local = MongoClient(st.secrets["MONGO_URI"]) # <--- Menggunakan koneksi lokal baru untuk menyimpan
+        db_local = mongo_client_local[st.secrets["MONGO_DB"]]
+        collection_local = db_local[st.secrets["MONGO_COLLECTION"]]
 
-        client = MongoClient(st.secrets["MONGO_URI"])
-        db = client[st.secrets["MONGO_DB"]]
-        collection = db[st.secrets["MONGO_COLLECTION"]]
+        now = datetime.now()
 
-        now = datetime.now()
+        document = {
+            "number": number,
+            "name": name,
+            "chat": all_data,
+            "time": now
+        }
 
-        document = {
-            "number": number,
-            "name": name,
-            "chat": all_data,
-            "time": now
-        }
+        collection_local.insert_one(document)
+        return True
 
-        collection.insert_one(document)
-        return True
+    except Exception as e:
+        st.error(f"MongoDB 저장 중 오류가 발생했습니다: {e}")
+        return False
 
-    except Exception as e:
-        st.error(f"MongoDB 저장 중 오류가 발생했습니다: {e}")
-        return False
-
-    finally:
-        if client:
-            mongo_client.close()
+    finally:
+        if mongo_client_local:
+            mongo_client_local.close()
 
 
-# GPT 응답 생성 함수
+# GPT Respon Generate Fungsi
 def get_chatgpt_response(prompt):
+    # Gunakan client global yang sudah diinisialisasi di atas
     messages_for_api = [{"role": "system", "content": initial_prompt}] + st.session_state["messages"] + [{"role": "user", "content": prompt}]
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=messages_for_api,
-    )
-    answer = response.choices[0].message.content
+    
+    # Menambahkan penanganan error untuk API call
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=messages_for_api,
+        )
+        answer = response.choices[0].message.content
 
-    # 사용자와 챗봇 대화만 기록
-    st.session_state["messages"].append({"role": "user", "content": prompt})
-    st.session_state["messages"].append({"role": "assistant", "content": answer})
-    return answer
+        # Simpan dialog ke session state
+        st.session_state["messages"].append({"role": "user", "content": prompt})
+        st.session_state["messages"].append({"role": "assistant", "content": answer})
+        return answer
+    except Exception as e:
+        st.error(f"OpenAI API 호출 중 오류가 발생했습니다: {e}")
+        return "죄송합니다. 현재 AI 서버에 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."
 
-# 세션 상태를 초기화하는 함수 (처음으로 돌아갈 때 사용)
+
+# Session State Reset Fungsi
 def reset_session_state():
-    for key in list(st.session_state.keys()):
-        if key not in ["user_number", "user_name"]: # 학번과 이름은 유지
-            del st.session_state[key]
-    st.session_state["messages"] = []
-    st.session_state["chat_ended"] = False
-    st.session_state["user_said_finish"] = False
-    st.session_state["feedback_saved"] = False # 피드백 저장 플래그도 초기화
+    for key in list(st.session_state.keys()):
+        if key not in ["user_number", "user_name"]: # 학번과 이름은 유지
+            del st.session_state[key]
+    st.session_state["messages"] = []
+    st.session_state["chat_ended"] = False
+    st.session_state["user_said_finish"] = False
+    st.session_state["feedback_saved"] = False 
 
-# 페이지 1: 학번 및 이름 입력
+
+# --- HALAMAN APLIKASI ---
+
+# Halaman 1: Input 학번 (Nomor Siswa) 및 이름 (Nama)
 def page_1():
-    st.title("수학여행 도우미 챗봇 M1")
-    st.write("학번과 이름을 입력한 뒤 '다음' 버튼을 눌러주세요.")
+    st.title("수학여행 도우미 챗봇 M1")
+    st.write("학번과 이름을 입력한 뒤 '다음' 버튼을 눌러주세요.")
 
-    if "user_number" not in st.session_state:
-        st.session_state["user_number"] = ""
-    if "user_name" not in st.session_state:
-        st.session_state["user_name"] = ""
+    if "user_number" not in st.session_state:
+        st.session_state["user_number"] = ""
+    if "user_name" not in st.session_state:
+        st.session_state["user_name"] = ""
 
-    st.session_state["user_number"] = st.text_input("학번", value=st.session_state["user_number"])
-    st.session_state["user_name"] = st.text_input("이름", value=st.session_state["user_name"])
+    st.session_state["user_number"] = st.text_input("학번", value=st.session_state["user_number"])
+    st.session_state["user_name"] = st.text_input("이름", value=st.session_state["user_name"])
 
-    st.write(" ")  # Add space to position the button at the bottom properly
-    if st.button("다음", key="page1_next_button"):
-        if st.session_state["user_number"].strip() == "" or st.session_state["user_name"].strip() == "":
-            st.error("학번과 이름을 모두 입력해주세요.")
-        else:
-            st.session_state["step"] = 2
-            st.rerun()
+    st.write(" ") 
+    if st.button("다음", key="page1_next_button"):
+        if st.session_state["user_number"].strip() == "" or st.session_state["user_name"].strip() == "":
+            st.error("학번과 이름을 모두 입력해주세요.")
+        else:
+            st.session_state["step"] = 2
+            st.rerun()
 
-# 페이지 2: 사용법 안내
+# Halaman 2: Panduan Penggunaan
 def page_2():
-    st.title("수학여행 도우미 활용 방법")
-    st.write(
-        """  
-        ※주의! '자동 번역'을 활성화하면 대화가 이상하게 번역되므로 활성화하면 안 돼요. 혹시 이미 '자동 번역' 버튼을 눌렀다면 비활성화 하세요.  
+    st.title("수학여행 도우미 활용 방법")
+    st.write(
+        """  
+        ※주의! '자동 번역'을 활성화하면 대화가 이상하게 번역되므로 활성화하면 안 돼요. 혹시 이미 '자동 번역' 버튼을 눌렀다면 비활성화 하세요.  
 
 학생은 다음과 같은 절차로 챗봇을 활용하도록 안내되었습니다:
 
@@ -184,172 +212,175 @@ def page_2():
 ④ 궁금한 걸 다 물어봤다면 ‘궁금한 건 다 물어봤어’라고 말해주세요. 또는 [마침] 버튼을 눌러주세요.
 
 ⑤ 인공지능이 충분히 대화가 이루어졌다고 판단되면 [다음] 버튼을 눌러도 된다고 안내할 거예요. 그때 버튼을 눌러주세요.
-        """)
+        """)
 
-    # 버튼
-    col1, col2 = st.columns([1, 1])
+    # Tombol
+    col1, col2 = st.columns([1, 1])
 
-    with col1:
-        if st.button("이전"):
-            st.session_state["step"] = 1
-            st.rerun()
+    with col1:
+        if st.button("이전"):
+            st.session_state["step"] = 1
+            st.rerun()
 
-    with col2:
-        if st.button("다음", key="page2_next_button"):
+    with col2:
+        if st.button("다음", key="page2_next_button"):
+            st.session_state["step"] = 3
+            st.rerun()
+
+# Halaman 3: Chat dengan GPT
+def page_3():
+    st.title("수학여행 도우미 활용하기")
+    st.write("수학여행 도우미와 대화를 나누며 수학을 설계하세요.")
+
+    if not st.session_state.get("user_number") or not st.session_state.get("user_name"):
+        st.error("학번과 이름이 누락되었습니다. 다시 입력해주세요.")
+        st.session_state["step"] = 1
+        st.rerun()
+
+    if "messages" not in st.session_state:
+        st.session_state["messages"] = []
+
+    if "user_input_temp" not in st.session_state:
+        st.session_state["user_input_temp"] = ""
+
+    if "recent_message" not in st.session_state:
+        st.session_state["recent_message"] = {"user": "", "assistant": ""}
+
+    # Chat sudah berakhir, nonaktifkan input dan tombol Send/Finish
+    if st.session_state.get("chat_ended", False):
+        st.info("대화가 종료되었습니다. [다음] 버튼을 눌러 피드백을 확인해주세요.")
+        user_input = st.text_area(
+            "You: ",
+            value="",
+            key="user_input",
+            disabled=True
+        )
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            st.button("전송", disabled=True)
+        with col2:
+            st.button("마침", disabled=True)
+    else:
+        user_input = st.text_area(
+            "You: ",
+            value=st.session_state["user_input_temp"],
+            key="user_input",
+            on_change=lambda: st.session_state.update({"user_input_temp": st.session_state["user_input"]}),
+        )
+
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            if st.button("전송"):
+                if user_input.strip():
+                    assistant_response = get_chatgpt_response(user_input)
+                    st.session_state["recent_message"] = {"user": user_input, "assistant": assistant_response}
+                    st.session_state["user_input_temp"] = ""
+                    st.rerun()
+
+        with col2:
+            if st.button("마침"):
+                final_input = "마침"
+                assistant_response = get_chatgpt_response(final_input)
+                st.session_state["recent_message"] = {"user": final_input, "assistant": assistant_response}
+                st.session_state["user_input_temp"] = ""
+                st.session_state["chat_ended"] = True
+                st.session_state["user_said_finish"] = True 
+                st.rerun()
+
+    # Output
+    st.subheader("📌 최근 대화")
+    if st.session_state["recent_message"]["user"] or st.session_state["recent_message"]["assistant"]:
+        st.write(f"**You:** {st.session_state['recent_message']['user']}")
+        st.write(f"**수학여행 도우미:** {st.session_state['recent_message']['assistant']}")
+    else:
+        st.write("아직 최근 대화가 없습니다.")
+
+    st.subheader("📜 누적 대화 목록")
+    if st.session_state["messages"]:
+        for message in st.session_state["messages"]:
+            if message["role"] == "user":
+                st.write(f"**You:** {message['content']}")
+            elif message["role"] == "assistant":
+                st.write(f"**수학여행 도우미:** {message['content']}")
+    else:
+        st.write("아직 대화 기록이 없습니다.")
+
+    col3, col4 = st.columns([1, 1])
+    with col3:
+        if st.button("이전"):
+            st.session_state["step"] = 2
+            st.session_state["chat_ended"] = False 
+            st.session_state["user_said_finish"] = False 
+            st.rerun()
+    with col4:
+        if st.session_state.get("chat_ended", False):
+            if st.button("다음", key="page3_next_button_enabled"):
+                st.session_state["step"] = 4
+                st.session_state["feedback_saved"] = False
+                st.rerun()
+        else:
+            st.button("다음", key="page3_next_button_disabled", disabled=True)
+
+
+# MySQL Simpan Feedback Fungsi (Perlu diperhatikan: save_to_mongo sudah ada. Fungsi ini tampaknya untuk Feedback terpisah)
+def save_feedback_to_db(feedback):
+    number = st.session_state.get('user_number', '').strip()
+    name = st.session_state.get('user_name', '').strip()
+
+    if not number or not name:
+        st.error("사용자 학번과 이름을 입력해야 합니다.")
+        return False
+
+    try:
+        # Perhatikan: Pastikan Anda telah menginstal pymysql
+        db = pymysql.connect(
+            host=st.secrets["DB_HOST"],
+            user=st.secrets["DB_USER"],
+            password=st.secrets["DB_PASSWORD"],
+            database=st.secrets["DB_DATABASE"],
+            charset="utf8mb4",
+            autocommit=True
+        )
+        cursor = db.cursor()
+        now = datetime.now()
+
+        sql = """
+        INSERT INTO feedback (number, name, feedback, time)
+        VALUES (%s, %s, %s, %s)
+        """
+        val = (number, name, feedback, now)
+
+        cursor.execute(sql, val)
+        cursor.close()
+        db.close()
+        st.success("피드백이 성공적으로 저장되었습니다.")
+        return True
+    except pymysql.MySQLError as db_err:
+        st.error(f"DB 처리 중 오류가 발생했습니다: {db_err}")
+    except Exception as e:
+        st.error(f"알 수 없는 오류가 발생했습니다: {e}")
+    return False
+
+# Halaman 4: Output Proses Penyelesaian Masalah
+def page_4():
+    st.title("수학여행 도우미의 제안")
+    st.write("수학여행 도우미가 대화 내용을 정리 중입니다. 잠시만 기다려주세요.")
+
+    # Cek apakah feedback sudah dibuat di session state
+    if "experiment_plan" not in st.session_state or not st.session_state.get("feedback_saved", False):
+
+        # Pastikan ada pesan, kalau tidak kembali ke halaman 3
+        if not st.session_state["messages"]:
+            st.warning("대화 기록이 없습니다. 이전 페이지로 돌아가 대화를 시작해주세요.")
             st.session_state["step"] = 3
             st.rerun()
-
-# 페이지 3: GPT와 대화
-def page_3():
-    st.title("수학여행 도우미 활용하기")
-    st.write("수학여행 도우미와 대화를 나누며 수학을 설계하세요.")
-
-    if not st.session_state.get("user_number") or not st.session_state.get("user_name"):
-        st.error("학번과 이름이 누락되었습니다. 다시 입력해주세요.")
-        st.session_state["step"] = 1
-        st.rerun()
-
-    if "messages" not in st.session_state:
-        st.session_state["messages"] = []
-
-    if "user_input_temp" not in st.session_state:
-        st.session_state["user_input_temp"] = ""
-
-    if "recent_message" not in st.session_state:
-        st.session_state["recent_message"] = {"user": "", "assistant": ""}
-
-    # 채팅이 종료된 상태라면 입력창과 전송/마침 버튼 비활성화
-    if st.session_state.get("chat_ended", False):
-        st.info("대화가 종료되었습니다. [다음] 버튼을 눌러 피드백을 확인해주세요.")
-        user_input = st.text_area(
-            "You: ",
-            value="",
-            key="user_input",
-            disabled=True # 입력창 비활성화
-        )
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            st.button("전송", disabled=True) # 전송 버튼 비활성화
-        with col2:
-            st.button("마침", disabled=True) # 마침 버튼 비활성화
-    else:
-        user_input = st.text_area(
-            "You: ",
-            value=st.session_state["user_input_temp"],
-            key="user_input",
-            on_change=lambda: st.session_state.update({"user_input_temp": st.session_state["user_input"]}),
-        )
-
-        col1, col2 = st.columns([1, 1])
-
-        with col1:
-            if st.button("전송"):
-                if user_input.strip():
-                    assistant_response = get_chatgpt_response(user_input)
-                    st.session_state["recent_message"] = {"user": user_input, "assistant": assistant_response}
-                    st.session_state["user_input_temp"] = ""
-                    st.rerun()
-
-        with col2:
-            if st.button("마침"):
-                # "마침"이라고 사용자가 명시적으로 입력한 것처럼 처리
-                final_input = "마침"
-                assistant_response = get_chatgpt_response(final_input)
-                st.session_state["recent_message"] = {"user": final_input, "assistant": assistant_response}
-                st.session_state["user_input_temp"] = ""
-                st.session_state["chat_ended"] = True # 채팅 종료 플래그 설정
-                st.session_state["user_said_finish"] = True # 사용자가 마침을 눌렀음을 기록
-                st.rerun()
-
-    # 최근 대화 출력
-    st.subheader("📌 최근 대화")
-    if st.session_state["recent_message"]["user"] or st.session_state["recent_message"]["assistant"]:
-        st.write(f"**You:** {st.session_state['recent_message']['user']}")
-        st.write(f"**수학여행 도우미:** {st.session_state['recent_message']['assistant']}")
-    else:
-        st.write("아직 최근 대화가 없습니다.")
-
-    # 누적 대화 출력
-    st.subheader("📜 누적 대화 목록")
-    if st.session_state["messages"]:
-        for message in st.session_state["messages"]:
-            if message["role"] == "user":
-                st.write(f"**You:** {message['content']}")
-            elif message["role"] == "assistant":
-                st.write(f"**수학여행 도우미:** {message['content']}")
-    else:
-        st.write("아직 대화 기록이 없습니다.")
-
-    col3, col4 = st.columns([1, 1])
-    with col3:
-        if st.button("이전"):
-            st.session_state["step"] = 2
-            st.session_state["chat_ended"] = False # 이전으로 돌아가면 채팅 종료 플래그 초기화
-            st.session_state["user_said_finish"] = False # 플래그 초기화
-            st.rerun()
-    with col4:
-        # '다음' 버튼은 '마침'을 눌러 대화가 종료된 후에만 유효하도록 변경
-        if st.session_state.get("chat_ended", False):
-            if st.button("다음", key="page3_next_button_enabled"):
-                st.session_state["step"] = 4
-                st.session_state["feedback_saved"] = False
-                st.rerun()
-        else:
-            st.button("다음", key="page3_next_button_disabled", disabled=True) # 대화 종료 전에는 비활성화
-
-
-# 피드백 저장 함수
-def save_feedback_to_db(feedback):
-    number = st.session_state.get('user_number', '').strip()
-    name = st.session_state.get('user_name', '').strip()
-
-    if not number or not name:  # 학번과 이름 확인
-        st.error("사용자 학번과 이름을 입력해야 합니다.")
-        return False  # 저장 실패
-
-    try:
-        db = pymysql.connect(
-            host=st.secrets["DB_HOST"],
-            user=st.secrets["DB_USER"],
-            password=st.secrets["DB_PASSWORD"],
-            database=st.secrets["DB_DATABASE"],
-            charset="utf8mb4",  # UTF-8 지원
-            autocommit=True  # 자동 커밋 활성화
-        )
-        cursor = db.cursor()
-        now = datetime.now()
-
-        sql = """
-        INSERT INTO feedback (number, name, feedback, time)
-        VALUES (%s, %s, %s, %s)
-        """
-        val = (number, name, feedback, now)
-
-        # SQL 실행
-        cursor.execute(sql, val)
-        cursor.close()
-        db.close()
-        st.success("피드백이 성공적으로 저장되었습니다.")
-        return True  # 저장 성공
-    except pymysql.MySQLError as db_err:
-        st.error(f"DB 처리 중 오류가 발생했습니다: {db_err}")
-    except Exception as e:
-        st.error(f"알 수 없는 오류가 발생했습니다: {e}")
-    return False  # 저장 실패
-
-# 페이지 4: 문제 풀이 과정 출력
-def page_4():
-    st.title("수학여행 도우미의 제안")
-    st.write("수학여행 도우미가 대화 내용을 정리 중입니다. 잠시만 기다려주세요.")
-
-    # 페이지 4로 돌아올 때마다 새로운 피드백 생성
-    if not st.session_state.get("feedback_saved", False):
-        # 대화 기록을 기반으로 풀이 과정 작성
+            return
+            
         chat_history = "\n".join(f"{msg['role']}: {msg['content']}" for msg in st.session_state["messages"])
-        
-        # "마침"을 눌렀을 경우에만 종료 조건을 만족하는 프롬프트 사용
-        if st.session_state.get("user_said_finish", False):
-            prompt = f"""
+        
+        if st.session_state.get("user_said_finish", False):
+            prompt = f"""
 다음은 학생과 수학여행 도우미의 대화 기록입니다:
 
 {chat_history}
@@ -369,7 +400,7 @@ def page_4():
 
 - **학생이 대화 중 스스로 정확한 정답을 제시한 경우**:
   - 문제 풀이 과정을 간결히 요약하고, LaTeX 수식으로 최종 정답을 제시하세요.
-  - 그리고 이어서 **난이도를 높인 새로운 수학 문제를 제시하세요.**
+  - 그리고 이어서 **난이도를 높인 새로운 수학 문제를 제시하세요.**
 
 - **정답을 제시하지 못했거나 오답을 제시한 경우**:
 - 정답을 언급하지 않고 문제 해결에 필요한 핵심 개념, 공식, 전략만 정리하세요. 설명은 생략하고 수식만 제시하세요.
@@ -378,72 +409,66 @@ def page_4():
 
 반드시 위 형식을 따르고, 항목 순서를 변경하지 마세요.
 """
-        else: # "마침"을 누르지 않고 "다음"을 눌러 넘어온 경우 (비정상적인 경우)
-            prompt = """
-            현재 대화가 명확히 종료되지 않았습니다.
-            이전 페이지로 돌아가서 '마침' 버튼을 누르거나 대화를 계속 진행해주세요.
-            """
+        else: 
+            st.session_state["experiment_plan"] = "현재 대화가 명확히 종료되지 않았습니다. 이전 페이지로 돌아가서 '마침' 버튼을 누르거나 대화를 계속 진행해주세요."
+            st.warning(st.session_state["experiment_plan"])
+            return # Keluar dari fungsi jika tidak ada input '마침'
 
-        # OpenAI API 호출
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "system", "content": prompt}]
-        )
-        st.session_state["experiment_plan"] = response.choices[0].message.content
-
-    # 피드백 출력
-    st.subheader("📋 생성된 피드백")
-    st.write(st.session_state["experiment_plan"])
-
-    # 새로운 변수에 대화 내용과 피드백을 통합
-    if "all_data" not in st.session_state:
-        st.session_state["all_data"] = []
-
-    all_data_to_store = st.session_state["messages"] + [{"role": "assistant", "content": st.session_state["experiment_plan"]}]
-
-    # 중복 저장 방지: 피드백 저장 여부 확인
-    if "feedback_saved" not in st.session_state:
-        st.session_state["feedback_saved"] = False  # 초기화
-
-    if not st.session_state["feedback_saved"]:
-        # 새로운 데이터(all_data_to_store)를 MySQL에 저장
-        if save_to_mongo(all_data_to_store):
-            st.session_state["feedback_saved"] = True
-        else:
-            st.error("저장에 실패했습니다. 다시 시도해주세요.")
-    else:
-        st.info("이미 피드백이 저장되었습니다.")
+        # OpenAI API 호출 (hanya jika ada prompt valid)
+        try:
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role": "system", "content": prompt}]
+            )
+            st.session_state["experiment_plan"] = response.choices[0].message.content
+        except Exception as e:
+            st.error(f"피드백 생성 중 OpenAI API 오류: {e}")
+            st.session_state["experiment_plan"] = "피드백 생성 중 오류가 발생했습니다."
 
 
-    # 새로운 버튼들
-    col_end1, col_end2 = st.columns([1, 1])
+    # Output Feedback
+    st.subheader("📋 생성된 피드백")
+    st.write(st.session_state["experiment_plan"])
 
-    with col_end1:
-        if st.button("저장 후 종료", key="save_and_exit_button"):
-            # 저장 로직은 이미 위에 구현되어 있음 (feedback_saved 플래그로 중복 방지)
-            st.success("대화 기록이 성공적으로 저장되었습니다. 프로그램을 종료합니다.")
-            st.stop() # Streamlit 앱 종료 (실제 환경에서는 다르게 동작할 수 있음)
-            
-    with col_end2:
-        if st.button("처음으로", key="start_over_button"):
-            # 저장 로직은 이미 위에 구현되어 있음 (feedback_saved 플래그로 중복 방지)
-            st.success("대화 기록이 성공적으로 저장되었습니다. 처음 페이지로 돌아갑니다.")
-            reset_session_state() # 세션 상태 초기화
-            st.session_state["step"] = 1 # 첫 페이지로 이동
-            st.rerun()
+    # Data untuk disimpan ke MongoDB
+    all_data_to_store = st.session_state["messages"] + [{"role": "assistant", "content": st.session_state["experiment_plan"]}]
+
+    # Menyimpan ke MongoDB
+    if "feedback_saved" not in st.session_state:
+        st.session_state["feedback_saved"] = False
+
+    if not st.session_state["feedback_saved"]:
+        if save_to_mongo(all_data_to_store):
+            st.session_state["feedback_saved"] = True
+        else:
+            st.error("저장에 실패했습니다. 다시 시도해주세요.")
+    else:
+        st.info("이미 피드백이 저장되었습니다.")
 
 
-# 메인 로직
-if "step" not in st.session_state:
-    st.session_state["step"] = 1
+    # Tombol
+    col_end1, col_end2 = st.columns([1, 1])
+
+    with col_end1:
+        if st.button("저장 후 종료", key="save_and_exit_button"):
+            st.success("대화 기록이 성공적으로 저장되었습니다. 프로그램을 종료합니다.")
+            st.stop() 
+            
+    with col_end2:
+        if st.button("처음으로", key="start_over_button"):
+            st.success("대화 기록이 성공적으로 저장되었습니다. 처음 페이지로 돌아갑니다.")
+            reset_session_state()
+            st.session_state["step"] = 1 
+            st.rerun()
+
+
+# --- LOGIKA UTAMA ---
 
 if st.session_state["step"] == 1:
-    page_1()
+    page_1()
 elif st.session_state["step"] == 2:
-    page_2()
+    page_2()
 elif st.session_state["step"] == 3:
-    page_3()
+    page_3()
 elif st.session_state["step"] == 4:
-    page_4()
-
-
+    page_4()
